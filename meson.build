@@ -1,23 +1,32 @@
 project('budgie-sensibo-monitor',
 	version: '0.1.0',
-	meson_version: '>= 0.40.0'
+	meson_version: '>= 0.48.0'
 )
 
-#i18n = import('i18n')
-python = import('python3')
-gnome = import('gnome')
+python = import('python')
 
 message('Looking for dependencies')
-python_bin = python.find_python()
-if not python_bin.found()
-	error('No python3 binary found')
+python_bin = python.find_installation('python3', required: true)
+message('Found python3 binary')
+
+budgie3_dep = dependency('budgie-3.0', required: false)
+budgie2_dep = dependency('budgie-2.0', required: false)
+budgie1_dep = dependency('budgie-1.0', required: false)
+
+budgie_gi_version = '3.0'
+peas_loader = 'python'
+if budgie3_dep.found()
+	message('Found budgie-3.0; using Peas loader "python"')
+elif budgie2_dep.found()
+	message('Found budgie-2.0; using Peas loader "python"')
+	budgie_gi_version = '2.0'
+elif budgie1_dep.found()
+	message('Found budgie-1.0; using Peas loader "python3"')
+	budgie_gi_version = '1.0'
+	peas_loader = 'python3'
 else
-	message('Found python3 binary')
+	warning('No Budgie pkg-config dependency detected; defaulting to Budgie 3.0 + Peas loader "python".')
 endif
-#dependency('glib-2.0')
-#dependency('budgie-1.0', version: '>=2')
-#dependency('gobject-introspection-1.0', version: '>=1.51.1')
-#dependency('gtk+-3.0', version :'>=3.22')
 
 # Global path variabel
 prefix = get_option('prefix')
@@ -29,6 +38,8 @@ APPLET_INSTALL_DIR = join_paths(libdir, 'budgie-desktop',
 
 conf = configuration_data()
 conf.set('PROJECT_NAME', meson.project_name())
+conf.set('BUDGIE_GI_VERSION', budgie_gi_version)
+conf.set('PEAS_LOADER', peas_loader)
 
 message('Installing applet...')
 

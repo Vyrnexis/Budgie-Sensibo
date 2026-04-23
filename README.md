@@ -13,14 +13,17 @@
 
   ```bash
    $ cd budgie-sensibo-monitor
-   $ mkdir build && cd build
-   $ meson --buildtype plain --prefix=/usr --libdir=/usr/lib
-   $ sudo ninja install
+   $ ./install.sh
+
+   Or manually:
+
+   $ meson setup build-local --buildtype plain --prefix=/usr
+   $ sudo ninja -C build-local install
   ```
 
    ### Uninstall
    Use the provided uninstall.sh script or use the below bash commands
 
   ```bash
-   $ sudo ninja uninstall
+   $ sudo ninja -C build-local uninstall
   ```

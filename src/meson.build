@@ -1,16 +1,13 @@
-install_data(
-    'budgie-sensibo-monitor.plugin',
+configure_file(
+    input: 'budgie-sensibo-monitor.plugin',
+    output: 'budgie-sensibo-monitor.plugin',
+    configuration: conf,
     install_dir: APPLET_INSTALL_DIR
 )
 
 install_data(
     'com.solus-project.budgie-sensibo-monitor.gschema.xml',
     install_dir: join_paths(datadir, 'glib-2.0', 'schemas'),
-)
-
-install_data(
-    'com.solus-project.budgie-sensibo-monitor.gschema.xml',
-    install_dir: join_paths(datadir, 'metainfo'),
 )
 
 install_data(

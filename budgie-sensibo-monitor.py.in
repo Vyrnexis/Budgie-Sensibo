@@ -2,37 +2,34 @@
 
 import requests
 import threading
-import time
-import json
-import gi.repository
+import gi
 
-gi.require_version('Budgie', '1.0')
+gi.require_version('Budgie', '@BUDGIE_GI_VERSION@')
 gi.require_version('Gtk', '3.0')
-from gi.repository import Budgie, GObject, Gtk, Gio, GLib
+from gi.repository import Budgie, GObject, Gtk, Gio, GLib, Gdk
 
 
 SERVER = 'https://home.sensibo.com/api/v2'
+SETTINGS_SCHEMA = 'com.solus-project.budgie-sensibo-monitor'
+REQUEST_TIMEOUT = 10
 
 
 class SensiboClientAPI:
-    def __init__(self, api_key):
+    def __init__(self, api_key, timeout=REQUEST_TIMEOUT):
         self._api_key = api_key
+        self._timeout = timeout
 
     def _get(self, path, **params):
         params['apiKey'] = self._api_key
-        response = requests.get(SERVER + path, params=params)
+        response = requests.get(SERVER + path, params=params, timeout=self._timeout)
         response.raise_for_status()
         return response.json()
 
-    def _patch(self, path, data, **params):
+    def _patch(self, path, payload, **params):
         params['apiKey'] = self._api_key
-        response = requests.patch(SERVER + path, params=params, data=data)
+        response = requests.patch(SERVER + path, params=params, json=payload, timeout=self._timeout)
         response.raise_for_status()
         return response.json()
-
-    def devices(self):
-        result = self._get("/users/me/pods", fields="id,room")
-        return {x['room']['name']: x['id'] for x in result['result']}
 
     def pod_measurement(self, podUid):
         result = self._get("/pods/%s/measurements" % podUid)
@@ -45,7 +42,7 @@ class SensiboClientAPI:
 
     def pod_change_ac_state(self, podUid, currentAcState, propertyToChange, newValue):
         self._patch("/pods/%s/acStates/%s" % (podUid, propertyToChange),
-                    json.dumps({'currentAcState': currentAcState, 'newValue': newValue}))
+                    {'currentAcState': currentAcState, 'newValue': newValue})
 
 
 class BudgieSensiboMonitor(GObject.GObject, Budgie.Plugin):
@@ -78,7 +75,8 @@ class BudgieSensiboMonitorSettings(Gtk.Grid):
         self.set_margin_end(6)
 
         self.settings = settings
-        self.settings = Gio.Settings(schema="com.solus-project.budgie-sensibo-monitor")
+        if self.settings is None:
+            self.settings = Gio.Settings(schema=SETTINGS_SCHEMA)
 
         # API Key
         self.attach(Gtk.Label("API Key:", halign=Gtk.Align.END), 0, 0, 1, 1)
@@ -99,10 +97,14 @@ class BudgieSensiboMonitorSettings(Gtk.Grid):
         # Refresh Interval
         self.attach(Gtk.Label("Refresh Interval (minutes):", halign=Gtk.Align.END), 0, 2, 1, 1)
         interval_spin = Gtk.SpinButton.new_with_range(1, 120, 1)
+        interval_spin.set_value(self.settings.get_int("intervals"))
+        interval_spin.connect("value-changed", self.on_interval_changed)
         self.attach(interval_spin, 1, 2, 1, 1)
-        self.settings.bind("intervals", interval_spin, "value", Gio.SettingsBindFlags.DEFAULT)
 
         self.show_all()
+
+    def on_interval_changed(self, spin):
+        self.settings.set_int("intervals", spin.get_value_as_int())
 
 
 
@@ -113,15 +115,23 @@ class BudgieSensiboMonitorApplet(Budgie.Applet):
         Budgie.Applet.__init__(self)
         # Settings
         self.uuid = uuid
-        self.settings = Gio.Settings(schema="com.solus-project.budgie-sensibo-monitor")
+        self.settings = Gio.Settings(schema=SETTINGS_SCHEMA)
 
         # Set API key and device Id from settings
-        self.apikey = self.settings.get_string('apikey')
-        self.deviceid = self.settings.get_string('deviceid')
-        self.refresh_interval = self.settings.get_int('intervals') * 60  # Convert minutes to seconds
+        self.apikey = ''
+        self.deviceid = ''
+        self.refresh_interval = 60
+        self.client = None
+        self.ac_state = None
+        self.manager = None
+        self._destroyed = False
+        self._power_change_in_progress = False
+        self._update_in_progress = False
+        self._syncing_switch = False
+        self._refresh_source_id = None
+        self._settings_signal_id = None
 
-        # Create a Sensibo Object with API key
-        self.client = SensiboClientAPI(self.apikey)
+        self._load_settings()
 
         # Create Gtk image and set an "off" state icon
         self.icon = Gtk.Image()
@@ -160,21 +170,155 @@ class BudgieSensiboMonitorApplet(Budgie.Applet):
         self.show_all()
         self.box.connect("button-press-event", self.on_press)
 
-        # Start the update thread
-        self.update_thread = SensiboUpdateThread(self.statslabel, self.icon, self.switch, self.client, self.deviceid, self.refresh_interval)
-        self.update_thread.start()
+        self._settings_signal_id = self.settings.connect("changed", self.on_settings_changed)
+        self.connect("destroy", self.on_destroy)
+        self._schedule_refresh()
+        self.refresh()
+
+    def _load_settings(self):
+        self.apikey = self.settings.get_string('apikey').strip()
+        self.deviceid = self.settings.get_string('deviceid').strip()
+        self.refresh_interval = max(60, self.settings.get_int('intervals') * 60)
+        self.client = SensiboClientAPI(self.apikey) if self.is_configured() else None
+
+    def is_configured(self):
+        return bool(self.apikey and self.deviceid)
+
+    def _schedule_refresh(self):
+        if self._refresh_source_id is not None:
+            GLib.source_remove(self._refresh_source_id)
+        self._refresh_source_id = GLib.timeout_add_seconds(self.refresh_interval, self.refresh)
+
+    def on_settings_changed(self, settings, key):
+        self._load_settings()
+        if key == 'intervals':
+            self._schedule_refresh()
+        self.refresh()
+
+    def on_destroy(self, widget):
+        self._destroyed = True
+        if self._refresh_source_id is not None:
+            GLib.source_remove(self._refresh_source_id)
+            self._refresh_source_id = None
+        if self._settings_signal_id is not None:
+            self.settings.disconnect(self._settings_signal_id)
+            self._settings_signal_id = None
+
+    def refresh(self):
+        if self._destroyed:
+            return False
+
+        if not self.is_configured():
+            self.statslabel.set_text("Configure API key and device ID")
+            self._set_switch_active(False)
+            self.icon.set_from_icon_name("sensibo-monitor-icon", Gtk.IconSize.MENU)
+            return True
+
+        if self._update_in_progress:
+            return True
+
+        self._update_in_progress = True
+        threading.Thread(target=self._fetch_state, args=(self.client, self.deviceid), daemon=True).start()
+        return True
+
+    def _fetch_state(self, client, deviceid):
+        try:
+            measurements = client.pod_measurement(deviceid)
+            ac_state = client.pod_ac_state(deviceid)
+        except Exception as error:
+            GLib.idle_add(self._finish_refresh_error, "Failed to load Sensibo data: %s" % error)
+            return
+
+        GLib.idle_add(self._apply_state, measurements, ac_state)
+
+    def _finish_refresh_error(self, message):
+        self._update_in_progress = False
+        return self._show_message(message)
+
+    def _show_message(self, message):
+        if not self._destroyed:
+            self.statslabel.set_text(message)
+        return False
+
+    def _apply_state(self, measurements, ac_state):
+        self._update_in_progress = False
+        if self._destroyed:
+            return False
+
+        self.ac_state = ac_state
+        self.statslabel.set_text(self._format_measurement(measurements))
+        ac_on = bool(ac_state.get('on'))
+        self.icon.set_from_icon_name("sensibo-monitor-icon-on" if ac_on else "sensibo-monitor-icon", Gtk.IconSize.MENU)
+        self._set_switch_active(ac_on)
+        return False
+
+    def _format_measurement(self, measurements):
+        if not measurements:
+            return "Temperature: --\nHumidity: --"
+
+        measurement = measurements[0]
+        temperature = measurement.get('temperature', '--')
+        humidity = measurement.get('humidity', '--')
+        return "Temperature: %s°\nHumidity: %s%%" % (temperature, humidity)
+
+    def _set_switch_active(self, active):
+        self._syncing_switch = True
+        self.switch.set_active(active)
+        self._syncing_switch = False
 
     def on_switch_activated(self, switch, gparam):
-        # switch on off, set sensibo device on or off and upodate applet icon
-        if switch.get_active():
-            self.icon.set_from_icon_name("sensibo-monitor-icon-on", Gtk.IconSize.MENU)
-            self.client.pod_change_ac_state(self.deviceid, self.update_thread.ac_state, "on", True)
-        else:
-            self.icon.set_from_icon_name("sensibo-monitor-icon", Gtk.IconSize.MENU)
-            self.client.pod_change_ac_state(self.deviceid, self.update_thread.ac_state, "on", False)
+        if self._syncing_switch:
+            return
+
+        if self._power_change_in_progress:
+            self._set_switch_active(bool(self.ac_state and self.ac_state.get('on')))
+            return
+
+        ac_on = switch.get_active()
+        self.icon.set_from_icon_name("sensibo-monitor-icon-on" if ac_on else "sensibo-monitor-icon", Gtk.IconSize.MENU)
+
+        if not self.is_configured() or self.ac_state is None:
+            self.statslabel.set_text("Waiting for Sensibo state")
+            self._set_switch_active(False)
+            return
+
+        self._power_change_in_progress = True
+        self.switch.set_sensitive(False)
+        threading.Thread(target=self._change_power_state, args=(self.client, self.deviceid, dict(self.ac_state), ac_on), daemon=True).start()
+
+    def _change_power_state(self, client, deviceid, ac_state, ac_on):
+        try:
+            client.pod_change_ac_state(deviceid, ac_state, "on", ac_on)
+        except Exception as error:
+            GLib.idle_add(self._finish_power_error, "Failed to update AC state: %s" % error)
+            return
+
+        GLib.idle_add(self._finish_power_change, ac_on)
+
+    def _finish_power_error(self, message):
+        self._power_change_in_progress = False
+        if not self._destroyed:
+            self.switch.set_sensitive(True)
+            self._set_switch_active(bool(self.ac_state and self.ac_state.get('on')))
+        return self._show_message(message)
+
+    def _finish_power_change(self, ac_on):
+        if self._destroyed:
+            return False
+
+        self._power_change_in_progress = False
+        self.switch.set_sensitive(True)
+        if self.ac_state is not None:
+            self.ac_state['on'] = ac_on
+        self.icon.set_from_icon_name("sensibo-monitor-icon-on" if ac_on else "sensibo-monitor-icon", Gtk.IconSize.MENU)
+        self._set_switch_active(ac_on)
+        return False
 
     def on_press(self, box, arg):
+        if self.manager is None:
+            return Gdk.EVENT_PROPAGATE
         self.manager.show_popover(self.box)
+        return Gdk.EVENT_STOP
 
     def do_update_popovers(self, manager):
         self.manager = manager
@@ -182,58 +326,10 @@ class BudgieSensiboMonitorApplet(Budgie.Applet):
 
     def do_get_settings_ui(self):
         """Return the applet settings with given uuid"""
-        return BudgieSensiboMonitorSettings(self.get_applet_settings(self.uuid))
+        return BudgieSensiboMonitorSettings(self.settings)
 
     def do_supports_settings(self):
         """Return True if support setting through Budgie Setting,
         False otherwise.
         """
         return True
-
-
-class SensiboUpdateThread(threading.Thread):
-    def __init__(self, statslabel, icon, switch, client, deviceid, refresh_interval):
-        threading.Thread.__init__(self)
-        self.statslabel = statslabel
-        self.icon = icon
-        self.switch = switch
-        self.client = client
-        self.deviceid = deviceid
-        self.refresh_interval = refresh_interval
-        self.ac_state = ''
-
-    def run(self):
-        while True:
-            ac_now = self.getACNow()
-            if ac_now:
-                GLib.idle_add(self.update_stats, ac_now)
-            else:
-                GLib.idle_add(self.statslabel.set_text, "Failed to load AC data")
-
-            self.ac_state = self.getACState()
-            if self.ac_state:
-                GLib.idle_add(self.update_state, self.ac_state)
-            else:
-                GLib.idle_add(self.statslabel.set_text, "Failed to load AC state")
-
-            time.sleep(self.refresh_interval)
-
-    def update_stats(self, ac_now):
-        self.statslabel.set_text(f"Temperature: {ac_now[0]['temperature']}°\nHumidity: {ac_now[0]['humidity']}%")
-
-    def update_state(self, ac_state):
-        ac_onoff = ac_state['on']
-        self.icon.set_from_icon_name("sensibo-monitor-icon-on" if ac_onoff else "sensibo-monitor-icon", Gtk.IconSize.MENU)
-        self.switch.set_active(ac_onoff)
-
-    def getACNow(self):
-        try:
-            return self.client.pod_measurement(self.deviceid)
-        except Exception:
-            return False
-
-    def getACState(self):
-        try:
-            return self.client.pod_ac_state(self.deviceid)
-        except Exception:
-            return False

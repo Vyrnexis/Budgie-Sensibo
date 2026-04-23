@@ -1,5 +1,5 @@
 [Plugin]
-Loader=python3
+Loader=@PEAS_LOADER@
 Module=budgie-sensibo-monitor
 Name=Budgie Sensibo Monitor
 Description=Budgie Sensibo Monitor

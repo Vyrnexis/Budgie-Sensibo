@@ -2,19 +2,20 @@
 <schemalist>
   <schema id="com.solus-project.budgie-sensibo-monitor" path="/com/solus-project/budgie-sensibo-monitor/" gettext-domain="budgie-sensibo-monitor">
     <key type="s" name="apikey">
-      <default>'API Key'</default>
+      <default>''</default>
       <summary>API Key</summary>
       <description>Sensibo API Key</description>
     </key>
     <key type="s" name="deviceid">
-      <default>'Device ID'</default>
+      <default>''</default>
       <summary>Device ID</summary>
-      <description>Sendibi Device name ID</description>
+      <description>Sensibo device ID</description>
     </key>
     <key type="i" name="intervals">
+      <range min="1" max="120"/>
       <default>1</default>
       <summary>Update Interval</summary>
-      <description>Sensibo update Intervals(minutes)</description>
+      <description>Sensibo update interval in minutes</description>
     </key>
   </schema>
 </schemalist>
